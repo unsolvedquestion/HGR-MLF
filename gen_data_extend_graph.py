@@ -1,329 +1,343 @@
-import numpy as np
-import os
-import random
-import json
-import pickle
-from nltk.tokenize import WordPunctTokenizer
+from __future__ import annotations
+
 import argparse
-import networkx as nx
-import matplotlib
+import json
+from pathlib import Path
+
 import joblib
-matplotlib.use('Agg')   #不显示绘图
-import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
 from tqdm import tqdm
-#from sklearn.externals import joblib   #解决pickle不能存储大数据的问题
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--in_path', type = str, default = "./data")
-parser.add_argument('--out_path', type = str, default = "./prepro_data")
-
-args = parser.parse_args()
-in_path = args.in_path
-out_path = args.out_path
-case_sensitive = False  #大小写不敏感
-
-char_limit = 16
-train_distant_file_name = os.path.join(in_path, 'train_distant.json')  #存储实体相关信息
-train_annotated_file_name = os.path.join(in_path, 'train_annotated.json') #实体标注
-dev_file_name = os.path.join(in_path, 'dev.json')  #验证集
-test_file_name = os.path.join(in_path, 'test.json') #测试集
-
-rel2id = json.load(open(os.path.join(out_path, 'rel2id.json'), "r"))   #关系集
-id2rel = {v:u for u,v in rel2id.items()}
-json.dump(id2rel, open(os.path.join(out_path, 'id2rel.json'), "w"))
-fact_in_train = set([])
-fact_in_dev_train = set([])
-pronoun_list = []   #词汇列表
-with open ('pronoun_list.txt','r') as f:
-	for line in f:
-		pronoun_list.append(line.strip().lower())
-
-relation_type = {(2, 2): 13535, 
-                 (4, 2): 3673,
-				 (1, 2): 3146, 
-				 (5, 4): 2269, 
-				 (4, 1): 1955, 
-				 (4, 3): 1848, 
-				 (5, 1): 1698, 
-				 (4, 4): 1552,
-				 (5, 3): 1448, 
-				 (5, 2): 1402, 
-				 (5, 5): 1367, 
-				 (4, 5): 1117, 
-				 (1, 1): 860, 
-				 (1, 4): 480, 
-				 (2, 1): 458, 
-				 (2, 4): 391, 
-				 (1, 3): 357, 
-				 (1, 5): 260,
-				 (2, 5): 212, 
-				 (2, 3): 152}
-
-def init(data_file_name, rel2id, max_length = 512, is_training = True, suffix=''):
-
-	max_exist_sentence_num = 0
-	max_sentence_length = 0
-	max_coexist_sentence_num = 0
-	max_coexist_sentence_length = 0
-
-	ori_data = json.load(open(data_file_name))   #初始数据
-
-	char2id = json.load(open(os.path.join(out_path, "char2id.json")))  #字符
-
-	word2id = json.load(open(os.path.join(out_path, "word2id.json")))  #词表
-	ner2id = json.load(open(os.path.join(out_path, "ner2id.json")))   #命名实体识别
-
-	# saving new data
-	print("Saving files")
-	if is_training:
-		name_prefix = "train"
-	else:
-		name_prefix = "dev"
-
-	Ma = 0
-	Ma_e = 0
-	data = []
 
 
-	for i in tqdm(range(len(ori_data))):   #tqdm进度条
-
-		item = {}
-
-		Ls = [0]
-		L = 0
-		document = []
-		for x in ori_data[i]['sents']:   #将所有文档提取出来
-			document.extend(x)  #extend在列表末尾追加另一个序列的多个值
-			L += len(x)      #句子的长度
-			Ls.append(L)   #start position of sentence  句子开始位置
-		
-		document_id = []
-		document_char_id = []
-		for j, word in enumerate(document):
-			word = word.lower()
-
-			if word in word2id:
-				document_id.append(word2id[word])   #记录输入文档中的词的id值
-			else:
-				document_id.append(word2id['UNK'])              #未知词代替所有未登录词
-            
-			word_char_id = np.zeros((char_limit))  #生成一个numpy数组  16
-			for c_idx, k in enumerate(list(word)):              #处理字符向量
-				if c_idx>=char_limit:      #大于最大限度就截断
-					break
-				word_char_id[c_idx] = char2id.get(k, char2id['UNK'])    #生成对于句子的向量
-			document_char_id.append(word_char_id)         #相当于文档向量列表
-		item['document'] = document_id
-		item['document_char'] = document_char_id
-
-		title = ori_data[i]['title']
-		title_id = []
-		title_char_id = []
-		for j, word in enumerate(title):
-			word = word.lower()
-
-			if word in word2id:
-				title_id.append(word2id[word])
-			else:
-				title_id.append(word2id['UNK'])              #未知词代替所有未登录词
-            
-			word_char_id = np.zeros((char_limit))
-			for c_idx, k in enumerate(list(word)):              #处理字符向量
-				if c_idx>=char_limit:
-					break
-				word_char_id[c_idx] = char2id.get(k, char2id['UNK'])
-			title_char_id.append (word_char_id)
-        
-		item['title'] = title
-		item['title_char'] = title_char_id
-	#上面是生成了文档的向量和文档标题的向量
-
-		articleGraph = nx.DiGraph()          #创建联通图，无向图
-
-		vertexSet =  ori_data[i]['vertexSet']   #第i篇文档的实体集合
-		# point position added with sent start position
-		max_exist_sentence_num_i =0
-		document_length = len(document)
-
-		for j in range(len(vertexSet)):       #遍历实体
-			articleGraph.add_node(j,exist_sentence = [],exist_pos=[],type = [])         #创建图中的实体节点
-			if len(vertexSet[j]) > max_exist_sentence_num:            #一个实体最多出现在多少个句子中，实际上是mention数量
-				max_exist_sentence_num = len(vertexSet[j])       #保存了实体出现的最多次数
-			#articleGraph.add_node(max_exist_sentence_num,exist_sentence = [],exist_pos=[],type = [])  #创建图中的提及结点
-			if len(vertexSet[j]) > max_exist_sentence_num_i:            #一个实体最多出现在多少个句子中，实际上是mention数量，本图中
-				max_exist_sentence_num_i = len(vertexSet[j])
-			# articleGraph.add_node(document_length, exist_sentence=[], exist_pos=[], type=[])  #创建图中的句子结点
-
-			for k in range(len(vertexSet[j])):              #遍历第J个实体的所有mention，提及-提及边
-				if ner2id[vertexSet[j][k]['type']] not in articleGraph.nodes[j]['type']:
-					articleGraph.nodes[j]['type'].append (ner2id[vertexSet[j][k]['type']])  #实体提及的类型加入到节点中
-					# print (vertexSet[j][0]['name'],vertexSet[j][0]['type'])
-					# print (vertexSet[j][0]['name'],vertexSet[j][k]['type'])
-				vertexSet[j][k]['sent_id'] = int(vertexSet[j][k]['sent_id'])      #实体提及的sent_id
-
-				sent_id = vertexSet[j][k]['sent_id']
-				dl = Ls[sent_id]                    #建立实体提及数量的列表
-				pos1 = vertexSet[j][k]['pos'][0]
-				pos2 = vertexSet[j][k]['pos'][1]
-				vertexSet[j][k]['pos'] = (pos1+dl, pos2+dl)    #句子中的位置改为整个文档中的位置
-				articleGraph.nodes[j]['exist_sentence'].append((Ls[sent_id],Ls[sent_id+1]))          #出现在第几个句子中,句子的开头和结尾位置
-				# articleGraph.nodes[j]['exist_sentence'].append(sent_id)          #出现在第几个句子中
-				articleGraph.nodes[j]['exist_pos'].append((pos1+dl,pos2+dl))           #出现在整个文档的哪个位置
-				if len(ori_data[i]['sents'][sent_id]) > max_sentence_length:         #最大的句子长度
-					max_sentence_length = len(ori_data[i]['sents'][sent_id])
-		articleGraph.graph['max_entity_exist_num'] = max_exist_sentence_num_i
-
-		document_length = len(document)
-		document_pos = np.zeros ((document_length))   #文档位置矩阵
-		document_ner = np.zeros ((document_length))    #文档命名实体识别矩阵
-		for idx, vertex in enumerate(vertexSet, 1):
-			for v in vertex:
-				document_pos[v['pos'][0]:v['pos'][1]] = idx                    #实体位置
-				document_ner[v['pos'][0]:v['pos'][1]] = ner2id[v['type']]      #实体类别标签
-		item['document_pos'] = document_pos
-		item['document_ner'] = document_ner
-        
-		#ori_data[i]['vertexSet'] = vertexSet
-
-		item['vertexSet'] = vertexSet
-		labels = ori_data[i].get('labels', [])    #三元组集合
-		item['labels'] = labels
-
-		# train_triple = set([])
-		# new_labels = []
-		label_matrix = np.zeros((len(vertexSet),len(vertexSet),len(rel2id)),dtype=np.uint8)
-		for label in labels:
-			rel = label['r']       #关系
-			assert(rel in rel2id)
-			label['r'] = rel2id[label['r']]        #关系对应的id
-			# if label_matrix[label['h'], label['t']] != 0:
-			label_matrix[label['h'], label['t'],label['r']] = 1     #正例对应的位置是label id else 0 (Na)
-		for h_i in range (len(vertexSet)):
-			for t_j in range (len(vertexSet)):
-				label_sum = label_matrix[h_i,t_j,:]
-				if label_sum.sum() == 0:
-					label_matrix[h_i,t_j,0] = 1
-
-		item['label_matrix'] = label_matrix
-
-		#遍历所有节点,创建图中的边(在同一个句子当中就建立一条边)
-		max_coexist_sentence_length_i = 0
-		max_coexist_sentence_num_i =0
-		label_mask = []
-
-		for node_j in articleGraph.nodes():
-			for node_k in articleGraph.nodes():
-				if node_j != node_k:
-					common_sentences = []
-					common_sentences_poses = []
-					common_next_sentences = []
-					common_next_sentences_poses = []
-					sents_j = articleGraph.nodes[node_j]['exist_sentence']
-					poses_j = articleGraph.nodes[node_j]['exist_pos']
-					sents_k = articleGraph.nodes[node_k]['exist_sentence']
-					poses_k = articleGraph.nodes[node_k]['exist_pos']
-					for pos_j,sent_j in zip(poses_j,sents_j):
-						for pos_k,sent_k in zip(poses_k,sents_k):
-							if sent_j == sent_k:
-								common_sentences.append(sent_j)
-								common_sentences_poses.append(pos_j+pos_k)
-								if sent_j[1]-sent_j[0] > max_coexist_sentence_length:         #最大的句子长度
-									max_coexist_sentence_length = sent_j[1]-sent_j[0]
-								if sent_j[1]-sent_j[0] > max_coexist_sentence_length_i:         #最大的句子长度，本图中
-									max_coexist_sentence_length_i = sent_j[1]-sent_j[0]
-								# if len(ori_data[i]['sents'][sent_j]) > max_coexist_sentence_length:         #最大的句子长度
-								#  	max_coexist_sentence_length = len(ori_data[i]['sents'][sent_j])
-							if sent_j[1] == sent_k[0]:   # sent j is in front of sent k
-								flag = False
-								for word in document[sent_j[0]:sent_k[1]]:
-									if word.lower() in pronoun_list:
-										flag = True
-										break
-								if flag:
-									common_next_sentences.append((sent_j[0],sent_k[1]))
-									common_next_sentences_poses.append(pos_j+pos_k)
-							if sent_j[0] == sent_k[1]:   # sent j is in front of sent k
-								flag = False
-								for word in document[sent_k[0]:sent_j[1]]:
-									if word.lower() in pronoun_list:
-										flag = True
-										break
-								if flag:
-									common_next_sentences.append((sent_k[0],sent_j[1]))
-									common_next_sentences_poses.append(pos_j+pos_k)
-
-					if common_sentences != []:
-						articleGraph.add_edge(node_j,node_k,sentences = common_sentences,position = common_sentences_poses)
-						if len(common_sentences) > max_coexist_sentence_num:              #统计共同出现的句子个数（实际上可能两个实体在同一个句子中多次出现，算多个句子）
-							max_coexist_sentence_num = len(common_sentences)
-						if len(common_sentences) > max_coexist_sentence_num_i:              #统计共同出现的句子个数（实际上可能两个实体在同一个句子中多次出现，算多个句子，本图中）
-							max_coexist_sentence_num_i = len(common_sentences)
-					elif common_next_sentences != []:
-						articleGraph.add_edge(node_j,node_k,sentences = common_next_sentences,position = common_next_sentences_poses)
-						if len(common_next_sentences) > max_coexist_sentence_num:              #统计共同出现的句子个数（实际上可能两个实体在同一个句子中多次出现，算多个句子）
-							max_coexist_sentence_num = len(common_next_sentences)
-						if len(common_next_sentences) > max_coexist_sentence_num_i:              #统计共同出现的句子个数（实际上可能两个实体在同一个句子中多次出现，算多个句子，本图中）
-							max_coexist_sentence_num_i = len(common_next_sentences)
-					
-					types_j = articleGraph.nodes[node_j]['type']
-					types_k = articleGraph.nodes[node_k]['type']
-					flag = False
-					for type_j in types_j:
-						for type_k in types_k:
-							if (type_j,type_k) in relation_type:
-								label_mask.append((node_j,node_k))
-								flag = True
-								break
-						if flag:
-							break
-
-		articleGraph.graph['max_sentence_length'] = max_coexist_sentence_length_i
-		articleGraph.graph['max_sentence_num'] = max_coexist_sentence_num_i
-		edge_num = len(articleGraph.edges)
-		if not edge_num:
-			#print (i)
-			nx.draw(articleGraph)
-			#print ('total nodes number:', len(data[choose_index]['graph'].nodes))
-			plt.savefig('./graph_fig/'+ name_prefix + suffix + '_zeroEdge_'+str(i) +'.jpg')
-			plt.show()
-			plt.close()
-
-		#item['na_triple'] = na_triple
-		item['Ls'] = Ls                               #每个句子start位置
-		#item['sents'] = ori_data[i]['sents']
-		item['graph'] = articleGraph
-		item['label_mask'] = label_mask
-		data.append(item)
-
-		Ma = max(Ma, len(vertexSet))                 #最多有多少个实体
-		#Ma_e = max(Ma_e, len(ori_data[i]['labels']))        #最多右多少对关系
-
-	print ('data_len:', len(ori_data))               #打印初始的文档个数
-
-	choose_index = 1
-	nx.draw(data[choose_index]['graph'])
-	#print ('total nodes number:', len(data[choose_index]['graph'].nodes))
-	plt.savefig('./graph_fig/'+ name_prefix + suffix + '_'+str(choose_index) +'.jpg')
-	plt.show()
-	plt.close()                #不关闭图片会导致图片覆盖！
-	
-	storage_size = 30000
-	with open(os.path.join(out_path, name_prefix + suffix + '_' + str(i) + '.pkl'), "wb") as f:
-		for i in range (int((len(data)-1)/storage_size) + 1):
-			joblib.dump(data[i*storage_size:min((i+1)*storage_size,len(data))], f)
-		f.close()
-
-	    # pickle.dump(data[i*storage_size:min((i+1)*storage_size,len(data))], open (os.path.join(out_path, name_prefix + suffix + '_' + str(i) + '.pkl'), "wb"), protocol=pickle.HIGHEST_PROTOCOL)
-
-	print("Finish saving")
-	print ('实体最多mention数：%d' %max_exist_sentence_num)
-	print ('最长句子长度为：%d' %max_sentence_length)
-	print ('实体对最多的mention数：%d' %max_coexist_sentence_num)
-	print ('实体对所在句子长度最长为：%d' %max_coexist_sentence_length)
-
-init(train_distant_file_name, rel2id, max_length = 512, is_training = True, suffix='')
-init(train_annotated_file_name, rel2id, max_length = 512, is_training = False, suffix='_train')
-init(dev_file_name, rel2id, max_length = 512, is_training = False, suffix='_dev')
-init(test_file_name, rel2id, max_length = 512, is_training = False, suffix='_test')
+PROJECT_ROOT = Path(__file__).resolve().parent
+CHAR_LIMIT = 16
+SPLIT_NAMES = ("train_distant", "train_annotated", "dev", "test")
+SPLIT_CONFIGS = {
+    "train_distant": ("train_distant.json", "train", ""),
+    "train_annotated": ("train_annotated.json", "dev", "_train"),
+    "dev": ("dev.json", "dev", "_dev"),
+    "test": ("test.json", "dev", "_test"),
+}
+RELATION_TYPE = {
+    (2, 2): 13535,
+    (4, 2): 3673,
+    (1, 2): 3146,
+    (5, 4): 2269,
+    (4, 1): 1955,
+    (4, 3): 1848,
+    (5, 1): 1698,
+    (4, 4): 1552,
+    (5, 3): 1448,
+    (5, 2): 1402,
+    (5, 5): 1367,
+    (4, 5): 1117,
+    (1, 1): 860,
+    (1, 4): 480,
+    (2, 1): 458,
+    (2, 4): 391,
+    (1, 3): 357,
+    (1, 5): 260,
+    (2, 5): 212,
+    (2, 3): 152,
+}
 
 
+def build_parser():
+    parser = argparse.ArgumentParser(description="Build GloVe graph-preprocessed DocRED files.")
+    parser.add_argument("--in_path", type=str, default="./data", help="Directory containing DocRED json files.")
+    parser.add_argument("--out_path", type=str, default="./prepro_data", help="Directory for output metadata and files.")
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        default=["all"],
+        choices=("all",) + SPLIT_NAMES,
+        help="Dataset splits to preprocess.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional cap on the number of documents processed per split for smoke tests.",
+    )
+    return parser
+
+
+def load_json(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def dump_json(path: Path, payload):
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+
+
+def resolve_splits(raw_splits):
+    if "all" in raw_splits:
+        return list(SPLIT_NAMES)
+    return list(raw_splits)
+
+
+def load_pronouns():
+    pronoun_path = PROJECT_ROOT / "pronoun_list.txt"
+    with pronoun_path.open("r", encoding="utf-8") as handle:
+        return [line.strip().lower() for line in handle if line.strip()]
+
+
+def ensure_required_metadata(out_path: Path):
+    required_files = ("rel2id.json", "word2id.json", "char2id.json", "ner2id.json")
+    missing = [file_name for file_name in required_files if not (out_path / file_name).exists()]
+    if missing:
+        missing_text = ", ".join(missing)
+        raise FileNotFoundError(f"Missing preprocessing metadata in `{out_path}`: {missing_text}")
+
+
+def prepare_resources(out_path: Path):
+    ensure_required_metadata(out_path)
+    rel2id = load_json(out_path / "rel2id.json")
+    dump_json(out_path / "id2rel.json", {value: key for key, value in rel2id.items()})
+    resources = {
+        "rel2id": rel2id,
+        "word2id": load_json(out_path / "word2id.json"),
+        "char2id": load_json(out_path / "char2id.json"),
+        "ner2id": load_json(out_path / "ner2id.json"),
+        "pronouns": load_pronouns(),
+    }
+    return resources
+
+
+def encode_token_chars(token, char2id):
+    token_chars = np.zeros((CHAR_LIMIT,))
+    for char_index, char in enumerate(str(token)):
+        if char_index >= CHAR_LIMIT:
+            break
+        token_chars[char_index] = char2id.get(char, char2id["UNK"])
+    return token_chars
+
+
+def vectorize_document(raw_item, word2id, char2id):
+    sentence_offsets = [0]
+    flat_document = []
+    total_length = 0
+    for sentence in raw_item["sents"]:
+        flat_document.extend(sentence)
+        total_length += len(sentence)
+        sentence_offsets.append(total_length)
+
+    document_ids = []
+    document_char = []
+    for token in flat_document:
+        token_lower = str(token).lower()
+        document_ids.append(word2id.get(token_lower, word2id["UNK"]))
+        document_char.append(encode_token_chars(token_lower, char2id))
+    return flat_document, sentence_offsets, document_ids, document_char
+
+
+def build_graph_and_labels(raw_item, sentence_offsets, document_tokens, rel2id, ner2id, pronouns):
+    vertex_set = raw_item["vertexSet"]
+    article_graph = nx.DiGraph()
+    max_exist_sentence_num = 0
+    max_sentence_length = 0
+
+    for entity_index, mentions in enumerate(vertex_set):
+        article_graph.add_node(entity_index, exist_sentence=[], exist_pos=[], type=[])
+        max_exist_sentence_num = max(max_exist_sentence_num, len(mentions))
+        for mention in mentions:
+            type_id = ner2id[mention["type"]]
+            if type_id not in article_graph.nodes[entity_index]["type"]:
+                article_graph.nodes[entity_index]["type"].append(type_id)
+
+            sent_id = int(mention["sent_id"])
+            mention["sent_id"] = sent_id
+            sentence_offset = sentence_offsets[sent_id]
+            pos1, pos2 = mention["pos"]
+            mention["pos"] = (pos1 + sentence_offset, pos2 + sentence_offset)
+
+            article_graph.nodes[entity_index]["exist_sentence"].append(
+                (sentence_offsets[sent_id], sentence_offsets[sent_id + 1])
+            )
+            article_graph.nodes[entity_index]["exist_pos"].append(mention["pos"])
+            max_sentence_length = max(max_sentence_length, len(raw_item["sents"][sent_id]))
+
+    article_graph.graph["max_entity_exist_num"] = max_exist_sentence_num
+
+    document_length = len(document_tokens)
+    document_pos = np.zeros((document_length,))
+    document_ner = np.zeros((document_length,))
+    for entity_index, mentions in enumerate(vertex_set, 1):
+        for mention in mentions:
+            document_pos[mention["pos"][0] : mention["pos"][1]] = entity_index
+            document_ner[mention["pos"][0] : mention["pos"][1]] = ner2id[mention["type"]]
+
+    labels = raw_item.get("labels", [])
+    label_matrix = np.zeros((len(vertex_set), len(vertex_set), len(rel2id)))
+    for label in labels:
+        relation_name = label["r"]
+        if relation_name not in rel2id:
+            raise KeyError(f"Unknown relation `{relation_name}` in item `{raw_item['title']}`")
+        relation_id = rel2id[relation_name]
+        label["r"] = relation_id
+        label_matrix[label["h"], label["t"], relation_id] = 1
+
+    for head_index in range(len(vertex_set)):
+        for tail_index in range(len(vertex_set)):
+            if label_matrix[head_index, tail_index, :].sum() == 0:
+                label_matrix[head_index, tail_index, 0] = 1
+
+    label_mask = []
+    max_coexist_sentence_num = 0
+    max_coexist_sentence_length = 0
+    for node_h in article_graph.nodes():
+        for node_t in article_graph.nodes():
+            if node_h == node_t:
+                continue
+
+            common_sentences = []
+            common_positions = []
+            common_next_sentences = []
+            common_next_positions = []
+            sentences_h = article_graph.nodes[node_h]["exist_sentence"]
+            positions_h = article_graph.nodes[node_h]["exist_pos"]
+            sentences_t = article_graph.nodes[node_t]["exist_sentence"]
+            positions_t = article_graph.nodes[node_t]["exist_pos"]
+
+            for pos_h, sent_h in zip(positions_h, sentences_h):
+                for pos_t, sent_t in zip(positions_t, sentences_t):
+                    if sent_h == sent_t:
+                        common_sentences.append(sent_h)
+                        common_positions.append(pos_h + pos_t)
+                        max_coexist_sentence_length = max(max_coexist_sentence_length, sent_h[1] - sent_h[0])
+
+                    if sent_h[1] == sent_t[0]:
+                        if any(token.lower() in pronouns for token in document_tokens[sent_h[0] : sent_t[1]]):
+                            common_next_sentences.append((sent_h[0], sent_t[1]))
+                            common_next_positions.append(pos_h + pos_t)
+                    if sent_h[0] == sent_t[1]:
+                        if any(token.lower() in pronouns for token in document_tokens[sent_t[0] : sent_h[1]]):
+                            common_next_sentences.append((sent_t[0], sent_h[1]))
+                            common_next_positions.append(pos_h + pos_t)
+
+            if common_sentences:
+                article_graph.add_edge(node_h, node_t, sentences=common_sentences, position=common_positions)
+                max_coexist_sentence_num = max(max_coexist_sentence_num, len(common_sentences))
+            elif common_next_sentences:
+                article_graph.add_edge(
+                    node_h,
+                    node_t,
+                    sentences=common_next_sentences,
+                    position=common_next_positions,
+                )
+                max_coexist_sentence_num = max(max_coexist_sentence_num, len(common_next_sentences))
+
+            entity_types_h = article_graph.nodes[node_h]["type"]
+            entity_types_t = article_graph.nodes[node_t]["type"]
+            if any((type_h, type_t) in RELATION_TYPE for type_h in entity_types_h for type_t in entity_types_t):
+                label_mask.append((node_h, node_t))
+
+    article_graph.graph["max_sentence_length"] = max_coexist_sentence_length
+    article_graph.graph["max_sentence_num"] = max_coexist_sentence_num
+
+    return {
+        "graph": article_graph,
+        "vertexSet": vertex_set,
+        "document_pos": document_pos,
+        "document_ner": document_ner,
+        "labels": labels,
+        "label_matrix": label_matrix,
+        "label_mask": label_mask,
+        "max_exist_sentence_num": max_exist_sentence_num,
+        "max_sentence_length": max_sentence_length,
+        "max_coexist_sentence_num": max_coexist_sentence_num,
+        "max_coexist_sentence_length": max_coexist_sentence_length,
+    }
+
+
+def process_split(split_name: str, input_path: Path, out_path: Path, limit: int | None, resources):
+    file_name, name_prefix, suffix = SPLIT_CONFIGS[split_name]
+    dataset = load_json(input_path / file_name)
+    if limit is not None:
+        dataset = dataset[:limit]
+    if not dataset:
+        raise ValueError(f"Split `{split_name}` has no documents to preprocess.")
+
+    word2id = resources["word2id"]
+    char2id = resources["char2id"]
+    rel2id = resources["rel2id"]
+    ner2id = resources["ner2id"]
+    pronouns = resources["pronouns"]
+
+    data = []
+    max_exist_sentence_num = 0
+    max_sentence_length = 0
+    max_coexist_sentence_num = 0
+    max_coexist_sentence_length = 0
+
+    for raw_item in tqdm(dataset, desc=f"{split_name}"):
+        document_tokens, sentence_offsets, document_ids, document_char = vectorize_document(raw_item, word2id, char2id)
+        graph_payload = build_graph_and_labels(
+            raw_item,
+            sentence_offsets,
+            document_tokens,
+            rel2id,
+            ner2id,
+            pronouns,
+        )
+
+        title = raw_item["title"]
+        data.append(
+            {
+                "document": document_ids,
+                "document_char": document_char,
+                "title": title,
+                "title_char": [encode_token_chars(char.lower(), char2id) for char in str(title)],
+                "vertexSet": graph_payload["vertexSet"],
+                "document_pos": graph_payload["document_pos"],
+                "document_ner": graph_payload["document_ner"],
+                "labels": graph_payload["labels"],
+                "label_matrix": graph_payload["label_matrix"],
+                "graph": graph_payload["graph"],
+                "label_mask": graph_payload["label_mask"],
+                "Ls": sentence_offsets,
+            }
+        )
+
+        max_exist_sentence_num = max(max_exist_sentence_num, graph_payload["max_exist_sentence_num"])
+        max_sentence_length = max(max_sentence_length, graph_payload["max_sentence_length"])
+        max_coexist_sentence_num = max(max_coexist_sentence_num, graph_payload["max_coexist_sentence_num"])
+        max_coexist_sentence_length = max(
+            max_coexist_sentence_length,
+            graph_payload["max_coexist_sentence_length"],
+        )
+
+    output_name = f"{name_prefix}{suffix}_{len(data) - 1}.pkl"
+    joblib.dump(data, out_path / output_name)
+
+    print(f"[{split_name}] data_len: {len(dataset)}")
+    print(f"[{split_name}] max_entity_mentions: {max_exist_sentence_num}")
+    print(f"[{split_name}] max_sentence_length: {max_sentence_length}")
+    print(f"[{split_name}] max_pair_sentence_count: {max_coexist_sentence_num}")
+    print(f"[{split_name}] max_pair_sentence_length: {max_coexist_sentence_length}")
+
+
+def main():
+    args = build_parser().parse_args()
+
+    input_path = Path(args.in_path).resolve()
+    out_path = Path(args.out_path).resolve()
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    resources = prepare_resources(out_path)
+    for split_name in resolve_splits(args.splits):
+        process_split(
+            split_name=split_name,
+            input_path=input_path,
+            out_path=out_path,
+            limit=args.limit,
+            resources=resources,
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

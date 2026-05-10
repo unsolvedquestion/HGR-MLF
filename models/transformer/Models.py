@@ -6,13 +6,10 @@ from torch.nn import Parameter
 import torch.nn.functional as F
 #import transformer_converter.Constants as Constants
 from models.transformer.Layers import TransformerLayer #, DecoderLayer
-from tensor_device import *
+from tensor_device import ParameterDevice
 
 __author__ = "Copied"
 
-np.random.seed(1337)
-torch.manual_seed(1337)
-torch.cuda.manual_seed(1337)
 mySeed = np.random.RandomState(1234)
 
 # def GetPaddingMask(seq):
@@ -143,6 +140,23 @@ class Encoder(nn.Module):
             return cleanEncodingVec
         else:
             return encodingOutput
+
+
+class Transformer(nn.Module):
+    """Compatibility placeholder for the legacy translation stack.
+
+    The current DocRE project does not use this sequence-to-sequence model.
+    We keep a concrete class here so legacy imports succeed and fail with a
+    clear runtime message only if someone tries to instantiate it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        del args, kwargs
+        raise RuntimeError(
+            "Legacy seq2seq Transformer is not part of the active DocRE pipeline. "
+            "Use `run_training.py` / `run_evaluation.py` for the relation extraction model."
+        )
 
 ## we do not need decoder
 

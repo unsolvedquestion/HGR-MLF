@@ -1,332 +1,437 @@
-import numpy as np
-import os
-import random
+from __future__ import annotations
+
+import argparse
 import json
 import pickle
-from nltk.tokenize import WordPunctTokenizer
-import argparse
+from pathlib import Path
+
 import networkx as nx
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import numpy as np
 from tqdm import tqdm
-from pytorch_pretrained_bert.tokenization import BertTokenizer
 
-#from sklearn.externals import joblib   #解决pickle不能存储大数据的问题
-tokenizer = BertTokenizer.from_pretrained('./bert/bert-base-uncased/', do_lower_case=True)
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--in_path', type = str, default =  "data")
-# parser.add_argument('--out_path', type = str, default = "prepro_data_bert/new")
-parser.add_argument('--out_path', type = str, default = "new_data")
-
-# rank_path = './result/GraphCNN_multihead_bert_afterpretrain_hop2_rank_checkpointtrain_rank.pkl'
-# rank_list = pickle.load(open(rank_path,'rb'))
-
-args = parser.parse_args()
-in_path = args.in_path
-out_path = args.out_path
-case_sensitive = False
-
-char_limit = 16
-train_distant_file_name = os.path.join(in_path, 'train_distant.json')
-train_annotated_file_name = os.path.join(in_path, 'train_annotated.json')
-dev_file_name = os.path.join(in_path, 'dev.json')
-test_file_name = os.path.join(in_path, 'test.json')
-
-rel2id = json.load(open(os.path.join(out_path, 'rel2id.json'), "r"))
-id2rel = {v:u for u,v in rel2id.items()}
-json.dump(id2rel, open(os.path.join(out_path, 'id2rel.json'), "w"))
-fact_in_train = set([])
-fact_in_dev_train = set([])
-pronoun_list = []
-with open ('pronoun_list.txt','r') as f:
-	for line in f:
-		pronoun_list.append(line.strip().lower())
-
-relation_type = {(2, 2): 13535, 
-                 (4, 2): 3673,
-				 (1, 2): 3146, 
-				 (5, 4): 2269, 
-				 (4, 1): 1955, 
-				 (4, 3): 1848, 
-				 (5, 1): 1698, 
-				 (4, 4): 1552,
-				 (5, 3): 1448, 
-				 (5, 2): 1402, 
-				 (5, 5): 1367, 
-				 (4, 5): 1117, 
-				 (1, 1): 860, 
-				 (1, 4): 480, 
-				 (2, 1): 458, 
-				 (2, 4): 391, 
-				 (1, 3): 357, 
-				 (1, 5): 260,
-				 (2, 5): 212, 
-				 (2, 3): 152}
-
-def init(data_file_name, rel2id, max_length = 512, is_training = True, suffix=''):
-	count_all_label_rel = 0
+from runtime_utils.bert_compat import load_bert_tokenizer
 
 
-	max_exist_sentence_num = 0
-	max_sentence_length = 0
-	max_coexist_sentence_num = 0
-	max_coexist_sentence_length = 0
-
-	ori_data = json.load(open(data_file_name))
-
-	char2id = json.load(open(os.path.join(out_path, "char2id.json")))
-	word2id = json.load(open(os.path.join(out_path, "word2id.json")))
-	ner2id = json.load(open(os.path.join(out_path, "ner2id.json")))
-
-	# saving new data
-	print("Saving files")
-	if is_training:
-		name_prefix = "train"
-	else:
-		name_prefix = "dev"
-
-	Ma = 0
-	Ma_e = 0
-	data = []
-	unk_num = 0
-	k_num = 0
-	#intrain = notintrain = notindevtrain = indevtrain = 0
-	storage_size = 10000
-	for i_t in tqdm(range(len(ori_data))):
-		i = i_t
-		item = {}
-		Ls = [0]
-		L = 0
-		document = []
-		for x in ori_data[i]['sents']:
-			document.extend(x)
-			L += len(x)
-			Ls.append(L)   #start position of sentence  句子开始位置
-		all_sentence_num = len(Ls) -1
-		#document_id = []
-		document_char_id = []
-		document_bert = ['[CLS]']
-		index_id = []
-		for j, word in enumerate(document):
-			word = word.lower()
-			start = len(document_bert)
-			new_word = tokenizer.tokenize(word)
-			document_bert.extend(new_word)
-			end = len(document_bert)
-			index_id.append((start,end))
-			# if word in word2id:
-			# 	document_id.append(word2id[word])
-			# else:
-			# 	document_id.append(word2id['UNK'])              #未知词代替所有未登录词
-			for w in new_word:
-				word_char_id = np.zeros((char_limit))
-				for c_idx, k in enumerate(list(w)):              #处理字符向量
-					if c_idx>=char_limit:
-						break
-					word_char_id[c_idx] = char2id.get(k, char2id['UNK'])
-				document_char_id.append (word_char_id)  
-		#document_bert = document_bert[:511]
-		document_bert.append('[SEP]')
-		document_id = tokenizer.convert_tokens_to_ids(document_bert)      
-		item['document'] = document_id
-		item['document_char'] = document_char_id
-
-		title = ori_data[i]['title']
-		title_id = []
-		title_char_id = []
-		for j, word in enumerate(title):
-			word = word.lower()
-			if word in word2id:
-				title_id.append(word2id[word])
-			else:
-				title_id.append(word2id['UNK'])              #未知词代替所有未登录词      
-			word_char_id = np.zeros((char_limit))
-			for c_idx, k in enumerate(list(word)):              #处理字符向量
-				if c_idx>=char_limit:
-					break
-				word_char_id[c_idx] = char2id.get(k, char2id['UNK'])
-			title_char_id.append (word_char_id)
-        
-		item['title'] = title
-		item['title_char'] = title_char_id
-		articleGraph = nx.DiGraph()          #创建联通图，无向图
-		vertexSet =  ori_data[i]['vertexSet']   #第i篇文档的实体集合
-		max_exist_sentence_num_i =0
-
-		node_sent_dict = {}		#用于记录每个结点表示的实体在document中出现的句子
-		for j in range(len(vertexSet)):       #遍历实体
-			sent_list = []
-			articleGraph.add_node(j,exist_sentence = [],exist_sentence_id = [],exist_pos=[],type = [])         #创建图中的实体节点
-			if len(vertexSet[j]) > max_exist_sentence_num:            #一个实体最多出现在多少个句子中，实际上是mention数量
-				max_exist_sentence_num = len(vertexSet[j])
-			if len(vertexSet[j]) > max_exist_sentence_num_i:            #一个实体最多出现在多少个句子中，实际上是mention数量，本图中
-				max_exist_sentence_num_i = len(vertexSet[j])
-			for k in range(len(vertexSet[j])):              #遍历第J个实体的所有mention
-				if ner2id[vertexSet[j][k]['type']] not in articleGraph.nodes[j]['type']:
-					articleGraph.nodes[j]['type'].append (ner2id[vertexSet[j][k]['type']])
-				vertexSet[j][k]['sent_id'] = int(vertexSet[j][k]['sent_id'])
-				sent_list.append(int(vertexSet[j][k]['sent_id']))
-				sent_id = vertexSet[j][k]['sent_id']
-				dl = Ls[sent_id]
-				pos1 = vertexSet[j][k]['pos'][0]
-				pos2 = vertexSet[j][k]['pos'][1]
-				vertexSet[j][k]['pos'] = (index_id[pos1+dl][0], index_id[pos2+dl-1][1])    #句子中的位置改为整个文档中的位置
-				articleGraph.nodes[j]['exist_sentence'].append((index_id[Ls[sent_id]][0],index_id[Ls[sent_id+1]-1][1]))          #出现在第几个句子中,句子的开头和结尾位置
-				articleGraph.nodes[j]['exist_sentence_id'].append(sent_id)
-				# articleGraph.nodes[j]['exist_sentence'].append(sent_id)          #出现在第几个句子中
-				articleGraph.nodes[j]['exist_pos'].append((index_id[pos1+dl][0],index_id[pos2+dl-1][1]))           #出现在整个文档的哪个位置
-				if len(ori_data[i]['sents'][sent_id]) > max_sentence_length:         #最大的句子长度
-					max_sentence_length = len(ori_data[i]['sents'][sent_id])
-			node_sent_dict[j] = sent_list
-		articleGraph.graph['max_entity_exist_num'] = max_exist_sentence_num_i
-		articleGraph.graph['all_sentence_num'] = all_sentence_num
-		# print('node_sent_dict',node_sent_dict)
-		assert len(vertexSet) == len(node_sent_dict)
-		item['node_sent_dict'] = node_sent_dict
-		document_length = len(document_id)
-		document_pos = np.zeros ((document_length))
-		document_ner = np.zeros ((document_length))
-		for idx, vertex in enumerate(vertexSet, 1):
-			for v in vertex:
-				document_pos[v['pos'][0]:v['pos'][1]] = idx                    #实体位置
-				document_ner[v['pos'][0]:v['pos'][1]] = ner2id[v['type']]      #实体类别标签
-		item['document_pos'] = document_pos
-		item['document_ner'] = document_ner
-		#ori_data[i]['vertexSet'] = vertexSet
-		item['vertexSet'] = vertexSet
-		# print('vertexSet',vertexSet)
-		labels = ori_data[i].get('labels', [])    #三元组集合
-		count_all_label_rel += len(labels)
-		item['labels'] = labels
-		# train_triple = set([])
-		# new_labels = []
-		label_matrix = np.zeros((len(vertexSet),len(vertexSet),len(rel2id)))
-		label_evidence = {}
-		for label in labels:
-			rel = label['r']
-			evidence = label['evidence']
-			assert(rel in rel2id)
-			label['r'] = rel2id[label['r']]        #关系对应的id
-			label_matrix[label['h'], label['t'],label['r']] = 1     #正例对应的位置是label id else 0 (Na)
-			evidence_label = np.zeros(all_sentence_num)
-			for e in evidence:
-				evidence_label[e] = 1
-			label_evidence[(label['h'], label['t'],label['r'])] = evidence_label
-		for h_i in range (len(vertexSet)):
-			for t_j in range (len(vertexSet)):
-				label_sum = label_matrix[h_i,t_j,:]
-				if label_sum.sum() == 0:
-					label_matrix[h_i,t_j,0] = 1
-		item['label_matrix'] = label_matrix
-	    
-		#遍历所有节点,创建图中的边(在同一个句子当中就建立一条边)
-		max_coexist_sentence_length_i = 0
-		max_coexist_sentence_num_i =0
-		label_mask = []
-
-		for node_j in articleGraph.nodes():
-			for node_k in articleGraph.nodes():
-				if node_j != node_k:
-					common_sentences = []
-					common_sentences_poses = []
-					common_next_sentences = []
-					common_next_sentences_poses = []
-					sents_j = articleGraph.nodes[node_j]['exist_sentence']
-					poses_j = articleGraph.nodes[node_j]['exist_pos']
-					sents_k = articleGraph.nodes[node_k]['exist_sentence']
-					poses_k = articleGraph.nodes[node_k]['exist_pos']
-					for pos_j,sent_j in zip(poses_j,sents_j):
-						for pos_k,sent_k in zip(poses_k,sents_k):
-							if sent_j == sent_k:
-								common_sentences.append(sent_j)
-								common_sentences_poses.append(pos_j+pos_k)
-								if sent_j[1]-sent_j[0] > max_coexist_sentence_length:         #最大的句子长度
-									max_coexist_sentence_length = sent_j[1]-sent_j[0]
-								if sent_j[1]-sent_j[0] > max_coexist_sentence_length_i:         #最大的句子长度，本图中
-									max_coexist_sentence_length_i = sent_j[1]-sent_j[0]
-								# if len(ori_data[i]['sents'][sent_j]) > max_coexist_sentence_length:         #最大的句子长度
-								#  	max_coexist_sentence_length = len(ori_data[i]['sents'][sent_j])
-							if sent_j[1] == sent_k[0]:   # sent j is in front of sent k
-								flag = False
-								for word in document_bert[sent_j[0]:sent_k[1]]:
-									if word.lower() in pronoun_list:
-										flag = True
-										break
-								if flag:
-									common_next_sentences.append((sent_j[0],sent_k[1]))
-									common_next_sentences_poses.append(pos_j+pos_k)
-							if sent_j[0] == sent_k[1]:   # sent j is in front of sent k
-								flag = False
-								for word in document_bert[sent_k[0]:sent_j[1]]:
-									if word.lower() in pronoun_list:
-										flag = True
-										break
-								if flag:
-									common_next_sentences.append((sent_k[0],sent_j[1]))
-									common_next_sentences_poses.append(pos_j+pos_k)
-
-					if common_sentences != []:
-						articleGraph.add_edge(node_j,node_k,sentences = common_sentences,position = common_sentences_poses)
-						if len(common_sentences) > max_coexist_sentence_num:              #统计共同出现的句子个数（实际上可能两个实体在同一个句子中多次出现，算多个句子）
-							max_coexist_sentence_num = len(common_sentences)
-						if len(common_sentences) > max_coexist_sentence_num_i:              #统计共同出现的句子个数（实际上可能两个实体在同一个句子中多次出现，算多个句子，本图中）
-							max_coexist_sentence_num_i = len(common_sentences)
-					elif common_next_sentences != []:
-						articleGraph.add_edge(node_j,node_k,sentences = common_next_sentences,position = common_next_sentences_poses)
-						if len(common_next_sentences) > max_coexist_sentence_num:              #统计共同出现的句子个数（实际上可能两个实体在同一个句子中多次出现，算多个句子）
-							max_coexist_sentence_num = len(common_next_sentences)
-						if len(common_next_sentences) > max_coexist_sentence_num_i:              #统计共同出现的句子个数（实际上可能两个实体在同一个句子中多次出现，算多个句子，本图中）
-							max_coexist_sentence_num_i = len(common_next_sentences)
-					
-					types_j = articleGraph.nodes[node_j]['type']
-					types_k = articleGraph.nodes[node_k]['type']
-					flag = False
-					for type_j in types_j:
-						for type_k in types_k:
-							if (type_j,type_k) in relation_type:
-								label_mask.append((node_j,node_k))
-								flag = True
-								break
-						if flag:
-							break
-
-		articleGraph.graph['max_sentence_length'] = max_coexist_sentence_length_i
-		articleGraph.graph['max_sentence_num'] = max_coexist_sentence_num_i
-		edge_num = len(articleGraph.edges)
-		if not edge_num:
-			nx.draw(articleGraph)
-			plt.savefig('./graph_fig/'+ name_prefix + suffix + '_zeroEdge_'+str(i) +'.jpg')
-			plt.show()
-			plt.close()
-		#item['na_triple'] = na_triple
-		item['Ls'] = Ls                               #每个句子start位置
-		#item['sents'] = ori_data[i]['sents']
-		item['graph'] = articleGraph
-		item['label_mask'] = label_mask
-		item['label_evidence'] = label_evidence
-		data.append(item)
-
-		Ma = max(Ma, len(vertexSet))                 #最多有多少个实体
-		#Ma_e = max(Ma_e, len(ori_data[i]['labels']))        #最多右多少对关系
-		if (i_t+1)%storage_size ==0 or i_t == len(ori_data)-1:
-			# pickle.dump(data, open (os.path.join(out_path, name_prefix + suffix + '_low2high_' + str(int(i_t/storage_size)) + '.pkl'), "wb"), protocol=pickle.HIGHEST_PROTOCOL)
-			pickle.dump(data, open (os.path.join(out_path, name_prefix + suffix + str(int(i_t/storage_size)) + '.pkl'), "wb"), protocol=pickle.HIGHEST_PROTOCOL)
-			data = []
-
-	print('count_all_label_rel',count_all_label_rel)
-	print ('num:',unk_num,k_num)
-	print ('data_len:', len(ori_data))               #打印初始的文档个数
-	print("Finish saving")
-	print ('实体最多mention数：%d' %max_exist_sentence_num)
-	print ('最长句子长度为：%d' %max_sentence_length)
-	print ('实体对最多的mention数：%d' %max_coexist_sentence_num)
-	print ('实体对所在句子长度最长为：%d' %max_coexist_sentence_length)
-
-init(train_distant_file_name, rel2id, max_length = 512, is_training = True, suffix='')
-init(train_annotated_file_name, rel2id, max_length = 512, is_training = False, suffix='_train')
-init(dev_file_name, rel2id, max_length = 512, is_training = False, suffix='_dev')
-init(test_file_name, rel2id, max_length = 512, is_training = False, suffix='_test')
+PROJECT_ROOT = Path(__file__).resolve().parent
+CHAR_LIMIT = 16
+DEFAULT_STORAGE_SIZE = 10000
+SPLIT_NAMES = ("train_distant", "train_annotated", "dev", "test")
+SPLIT_CONFIGS = {
+    "train_distant": ("train_distant.json", "train", ""),
+    "train_annotated": ("train_annotated.json", "dev", "_train"),
+    "dev": ("dev.json", "dev", "_dev"),
+    "test": ("test.json", "dev", "_test"),
+}
+RELATION_TYPE = {
+    (2, 2): 13535,
+    (4, 2): 3673,
+    (1, 2): 3146,
+    (5, 4): 2269,
+    (4, 1): 1955,
+    (4, 3): 1848,
+    (5, 1): 1698,
+    (4, 4): 1552,
+    (5, 3): 1448,
+    (5, 2): 1402,
+    (5, 5): 1367,
+    (4, 5): 1117,
+    (1, 1): 860,
+    (1, 4): 480,
+    (2, 1): 458,
+    (2, 4): 391,
+    (1, 3): 357,
+    (1, 5): 260,
+    (2, 5): 212,
+    (2, 3): 152,
+}
 
 
+def build_parser():
+    parser = argparse.ArgumentParser(description="Build BERT graph-preprocessed DocRED shards.")
+    parser.add_argument("--in_path", type=str, default="data", help="Directory containing DocRED json files.")
+    parser.add_argument("--out_path", type=str, default="new_data", help="Directory for output metadata and shards.")
+    parser.add_argument(
+        "--bert_model_dir",
+        type=str,
+        default="./bert/bert-base-uncased",
+        help="Local BERT model/tokenizer directory.",
+    )
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        default=["all"],
+        choices=("all",) + SPLIT_NAMES,
+        help="Dataset splits to preprocess.",
+    )
+    parser.add_argument(
+        "--storage_size",
+        type=int,
+        default=DEFAULT_STORAGE_SIZE,
+        help="Number of documents per pickle shard.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional cap on the number of documents processed per split for smoke tests.",
+    )
+    return parser
+
+
+def load_json(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def dump_json(path: Path, payload):
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+
+
+def resolve_splits(raw_splits):
+    if "all" in raw_splits:
+        return list(SPLIT_NAMES)
+    return list(raw_splits)
+
+
+def encode_token_chars(token, char2id):
+    token_chars = np.zeros((CHAR_LIMIT,))
+    for char_index, char in enumerate(str(token)):
+        if char_index >= CHAR_LIMIT:
+            break
+        token_chars[char_index] = char2id.get(char, char2id["UNK"])
+    return token_chars
+
+
+def load_pronouns():
+    pronoun_path = PROJECT_ROOT / "pronoun_list.txt"
+    with pronoun_path.open("r", encoding="utf-8") as handle:
+        return [line.strip().lower() for line in handle if line.strip()]
+
+
+def ensure_required_metadata(out_path: Path):
+    required_files = ("rel2id.json", "word2id.json", "char2id.json", "ner2id.json", "char_vec.npy")
+    missing = [file_name for file_name in required_files if not (out_path / file_name).exists()]
+    if missing:
+        missing_text = ", ".join(missing)
+        raise FileNotFoundError(f"Missing preprocessing metadata in `{out_path}`: {missing_text}")
+
+
+def prepare_resources(out_path: Path, bert_model_dir: Path):
+    ensure_required_metadata(out_path)
+    rel2id = load_json(out_path / "rel2id.json")
+    dump_json(out_path / "id2rel.json", {value: key for key, value in rel2id.items()})
+    resources = {
+        "rel2id": rel2id,
+        "word2id": load_json(out_path / "word2id.json"),
+        "char2id": load_json(out_path / "char2id.json"),
+        "ner2id": load_json(out_path / "ner2id.json"),
+        "pronouns": load_pronouns(),
+        "tokenizer": load_bert_tokenizer(str(bert_model_dir), do_lower_case=True),
+    }
+    return resources
+
+
+def build_document_index(document_tokens, tokenizer, char2id):
+    cls_token = getattr(tokenizer, "cls_token", "[CLS]") or "[CLS]"
+    sep_token = getattr(tokenizer, "sep_token", "[SEP]") or "[SEP]"
+    unk_token = getattr(tokenizer, "unk_token", "[UNK]") or "[UNK]"
+
+    bert_tokens = [cls_token]
+    token_spans = []
+    document_char = []
+    for token in document_tokens:
+        token_lower = str(token).lower()
+        pieces = tokenizer.tokenize(token_lower)
+        if not pieces:
+            pieces = [unk_token]
+        start = len(bert_tokens)
+        bert_tokens.extend(pieces)
+        end = len(bert_tokens)
+        token_spans.append((start, end))
+        for piece in pieces:
+            document_char.append(encode_token_chars(piece, char2id))
+    bert_tokens.append(sep_token)
+    document_ids = tokenizer.convert_tokens_to_ids(bert_tokens)
+    return bert_tokens, token_spans, document_ids, document_char
+
+
+def build_graph_and_labels(
+    raw_item,
+    sentence_offsets,
+    document_bert,
+    token_spans,
+    rel2id,
+    ner2id,
+    pronouns,
+):
+    vertex_set = raw_item["vertexSet"]
+    article_graph = nx.DiGraph()
+    node_sent_dict = {}
+    max_exist_sentence_num = 0
+    max_sentence_length = 0
+
+    for entity_index, mentions in enumerate(vertex_set):
+        sentence_ids = []
+        article_graph.add_node(
+            entity_index,
+            exist_sentence=[],
+            exist_sentence_id=[],
+            exist_pos=[],
+            type=[],
+        )
+        max_exist_sentence_num = max(max_exist_sentence_num, len(mentions))
+        for mention in mentions:
+            type_id = ner2id[mention["type"]]
+            if type_id not in article_graph.nodes[entity_index]["type"]:
+                article_graph.nodes[entity_index]["type"].append(type_id)
+
+            sent_id = int(mention["sent_id"])
+            sentence_ids.append(sent_id)
+            mention["sent_id"] = sent_id
+
+            sentence_offset = sentence_offsets[sent_id]
+            pos1, pos2 = mention["pos"]
+            token_start = token_spans[pos1 + sentence_offset][0]
+            token_end = token_spans[pos2 + sentence_offset - 1][1]
+            mention["pos"] = (token_start, token_end)
+
+            sentence_start = token_spans[sentence_offsets[sent_id]][0]
+            sentence_end = token_spans[sentence_offsets[sent_id + 1] - 1][1]
+            article_graph.nodes[entity_index]["exist_sentence"].append((sentence_start, sentence_end))
+            article_graph.nodes[entity_index]["exist_sentence_id"].append(sent_id)
+            article_graph.nodes[entity_index]["exist_pos"].append((token_start, token_end))
+            max_sentence_length = max(max_sentence_length, len(raw_item["sents"][sent_id]))
+
+        node_sent_dict[entity_index] = sentence_ids
+
+    article_graph.graph["max_entity_exist_num"] = max_exist_sentence_num
+    article_graph.graph["all_sentence_num"] = len(sentence_offsets) - 1
+
+    document_length = len(document_bert)
+    document_pos = np.zeros((document_length,))
+    document_ner = np.zeros((document_length,))
+    for entity_index, mentions in enumerate(vertex_set, 1):
+        for mention in mentions:
+            document_pos[mention["pos"][0] : mention["pos"][1]] = entity_index
+            document_ner[mention["pos"][0] : mention["pos"][1]] = ner2id[mention["type"]]
+
+    labels = raw_item.get("labels", [])
+    label_matrix = np.zeros((len(vertex_set), len(vertex_set), len(rel2id)))
+    label_evidence = {}
+    count_all_label_rel = len(labels)
+    for label in labels:
+        relation_name = label["r"]
+        if relation_name not in rel2id:
+            raise KeyError(f"Unknown relation `{relation_name}` in item `{raw_item['title']}`")
+        relation_id = rel2id[relation_name]
+        label["r"] = relation_id
+        label_matrix[label["h"], label["t"], relation_id] = 1
+        evidence = np.zeros(len(sentence_offsets) - 1)
+        for sentence_id in label["evidence"]:
+            evidence[sentence_id] = 1
+        label_evidence[(label["h"], label["t"], relation_id)] = evidence
+
+    for head_index in range(len(vertex_set)):
+        for tail_index in range(len(vertex_set)):
+            if label_matrix[head_index, tail_index, :].sum() == 0:
+                label_matrix[head_index, tail_index, 0] = 1
+
+    label_mask = []
+    max_coexist_sentence_num = 0
+    max_coexist_sentence_length = 0
+    for node_h in article_graph.nodes():
+        for node_t in article_graph.nodes():
+            if node_h == node_t:
+                continue
+
+            common_sentences = []
+            common_positions = []
+            common_next_sentences = []
+            common_next_positions = []
+            sentences_h = article_graph.nodes[node_h]["exist_sentence"]
+            positions_h = article_graph.nodes[node_h]["exist_pos"]
+            sentences_t = article_graph.nodes[node_t]["exist_sentence"]
+            positions_t = article_graph.nodes[node_t]["exist_pos"]
+
+            for pos_h, sent_h in zip(positions_h, sentences_h):
+                for pos_t, sent_t in zip(positions_t, sentences_t):
+                    if sent_h == sent_t:
+                        common_sentences.append(sent_h)
+                        common_positions.append(pos_h + pos_t)
+                        max_coexist_sentence_length = max(max_coexist_sentence_length, sent_h[1] - sent_h[0])
+
+                    if sent_h[1] == sent_t[0]:
+                        if any(token.lower() in pronouns for token in document_bert[sent_h[0] : sent_t[1]]):
+                            common_next_sentences.append((sent_h[0], sent_t[1]))
+                            common_next_positions.append(pos_h + pos_t)
+                    if sent_h[0] == sent_t[1]:
+                        if any(token.lower() in pronouns for token in document_bert[sent_t[0] : sent_h[1]]):
+                            common_next_sentences.append((sent_t[0], sent_h[1]))
+                            common_next_positions.append(pos_h + pos_t)
+
+            if common_sentences:
+                article_graph.add_edge(node_h, node_t, sentences=common_sentences, position=common_positions)
+                max_coexist_sentence_num = max(max_coexist_sentence_num, len(common_sentences))
+            elif common_next_sentences:
+                article_graph.add_edge(
+                    node_h,
+                    node_t,
+                    sentences=common_next_sentences,
+                    position=common_next_positions,
+                )
+                max_coexist_sentence_num = max(max_coexist_sentence_num, len(common_next_sentences))
+
+            entity_types_h = article_graph.nodes[node_h]["type"]
+            entity_types_t = article_graph.nodes[node_t]["type"]
+            if any((type_h, type_t) in RELATION_TYPE for type_h in entity_types_h for type_t in entity_types_t):
+                label_mask.append((node_h, node_t))
+
+    article_graph.graph["max_sentence_length"] = max_coexist_sentence_length
+    article_graph.graph["max_sentence_num"] = max_coexist_sentence_num
+
+    return {
+        "graph": article_graph,
+        "vertexSet": vertex_set,
+        "node_sent_dict": node_sent_dict,
+        "document_pos": document_pos,
+        "document_ner": document_ner,
+        "labels": labels,
+        "label_matrix": label_matrix,
+        "label_evidence": label_evidence,
+        "label_mask": label_mask,
+        "count_all_label_rel": count_all_label_rel,
+        "max_exist_sentence_num": max_exist_sentence_num,
+        "max_sentence_length": max_sentence_length,
+        "max_coexist_sentence_num": max_coexist_sentence_num,
+        "max_coexist_sentence_length": max_coexist_sentence_length,
+    }
+
+
+def write_shard(out_path: Path, name_prefix: str, suffix: str, shard_index: int, data):
+    output_path = out_path / f"{name_prefix}{suffix}{shard_index}.pkl"
+    with output_path.open("wb") as handle:
+        pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def process_split(
+    split_name: str,
+    input_path: Path,
+    out_path: Path,
+    storage_size: int,
+    limit: int | None,
+    resources,
+):
+    file_name, name_prefix, suffix = SPLIT_CONFIGS[split_name]
+    dataset = load_json(input_path / file_name)
+    if limit is not None:
+        dataset = dataset[:limit]
+    if not dataset:
+        raise ValueError(f"Split `{split_name}` has no documents to preprocess.")
+
+    tokenizer = resources["tokenizer"]
+    char2id = resources["char2id"]
+    rel2id = resources["rel2id"]
+    ner2id = resources["ner2id"]
+    pronouns = resources["pronouns"]
+
+    max_exist_sentence_num = 0
+    max_sentence_length = 0
+    max_coexist_sentence_num = 0
+    max_coexist_sentence_length = 0
+    count_all_label_rel = 0
+
+    buffered_items = []
+    shard_index = 0
+    for raw_item in tqdm(dataset, desc=f"{split_name}"):
+        sentence_offsets = [0]
+        flat_document = []
+        total_length = 0
+        for sentence in raw_item["sents"]:
+            flat_document.extend(sentence)
+            total_length += len(sentence)
+            sentence_offsets.append(total_length)
+
+        document_bert, token_spans, document_ids, document_char = build_document_index(
+            flat_document,
+            tokenizer,
+            char2id,
+        )
+        graph_payload = build_graph_and_labels(
+            raw_item,
+            sentence_offsets,
+            document_bert,
+            token_spans,
+            rel2id,
+            ner2id,
+            pronouns,
+        )
+
+        title = raw_item["title"]
+        buffered_items.append(
+            {
+                "document": document_ids,
+                "document_char": document_char,
+                "title": title,
+                "title_char": [encode_token_chars(char.lower(), char2id) for char in str(title)],
+                "graph": graph_payload["graph"],
+                "vertexSet": graph_payload["vertexSet"],
+                "node_sent_dict": graph_payload["node_sent_dict"],
+                "document_pos": graph_payload["document_pos"],
+                "document_ner": graph_payload["document_ner"],
+                "labels": graph_payload["labels"],
+                "label_matrix": graph_payload["label_matrix"],
+                "label_evidence": graph_payload["label_evidence"],
+                "label_mask": graph_payload["label_mask"],
+                "Ls": sentence_offsets,
+            }
+        )
+
+        count_all_label_rel += graph_payload["count_all_label_rel"]
+        max_exist_sentence_num = max(max_exist_sentence_num, graph_payload["max_exist_sentence_num"])
+        max_sentence_length = max(max_sentence_length, graph_payload["max_sentence_length"])
+        max_coexist_sentence_num = max(max_coexist_sentence_num, graph_payload["max_coexist_sentence_num"])
+        max_coexist_sentence_length = max(
+            max_coexist_sentence_length,
+            graph_payload["max_coexist_sentence_length"],
+        )
+
+        if len(buffered_items) >= storage_size:
+            write_shard(out_path, name_prefix, suffix, shard_index, buffered_items)
+            buffered_items = []
+            shard_index += 1
+
+    if buffered_items:
+        write_shard(out_path, name_prefix, suffix, shard_index, buffered_items)
+
+    print(f"[{split_name}] count_all_label_rel: {count_all_label_rel}")
+    print(f"[{split_name}] data_len: {len(dataset)}")
+    print(f"[{split_name}] max_entity_mentions: {max_exist_sentence_num}")
+    print(f"[{split_name}] max_sentence_length: {max_sentence_length}")
+    print(f"[{split_name}] max_pair_sentence_count: {max_coexist_sentence_num}")
+    print(f"[{split_name}] max_pair_sentence_length: {max_coexist_sentence_length}")
+
+
+def main():
+    args = build_parser().parse_args()
+
+    input_path = Path(args.in_path).resolve()
+    out_path = Path(args.out_path).resolve()
+    bert_model_dir = Path(args.bert_model_dir).resolve()
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    resources = prepare_resources(out_path, bert_model_dir)
+    for split_name in resolve_splits(args.splits):
+        process_split(
+            split_name=split_name,
+            input_path=input_path,
+            out_path=out_path,
+            storage_size=args.storage_size,
+            limit=args.limit,
+            resources=resources,
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

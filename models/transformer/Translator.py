@@ -4,13 +4,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from transformer.Models import Transformer
-from transformer.Beam import Beam
+from .Beam import Beam
+
+
+try:
+    from .Models import Transformer
+except Exception:  # pragma: no cover - legacy path only
+    Transformer = None
 
 class Translator(object):
     ''' Load with trained model and handle the beam search '''
 
     def __init__(self, opt):
+        if Transformer is None:
+            raise RuntimeError(
+                "The legacy sequence-to-sequence Transformer stack is unavailable. "
+                "This repository's main DocRE training pipeline does not depend on it."
+            )
         self.opt = opt
         self.device = torch.device('cuda' if opt.cuda else 'cpu')
 

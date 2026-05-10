@@ -5,11 +5,8 @@ import torch.nn as nn
 from torch.nn import Parameter
 import torch.nn.functional as F
 from models.transformer.Modules import ScaledDotProductAttention
-from tensor_device import *
+from tensor_device import ParameterDevice, resolve_device
 
-np.random.seed(1337)
-torch.manual_seed(1337)
-torch.cuda.manual_seed(1337)
 mySeed = np.random.RandomState(1234)
 
 
@@ -25,6 +22,7 @@ class MultiHeadAttention(nn.Module):
         self.vectorDim = vectorDim
         self.entityDim = entityDim
         self.hiddenDim = hiddenDim
+        self.device = resolve_device(use_cuda)
         #self.useGate = useGate
         
         if useAtt:
@@ -49,12 +47,12 @@ class MultiHeadAttention(nn.Module):
         # nn.init.normal_(self.w_vs.weight, mean=0, std=np.sqrt(2.0 / (d_model + d_v)))
 
         self.attention = ScaledDotProductAttention(temperature=np.power(self.hiddenDim, 0.5))
-        self.layerNorm = nn.LayerNorm(self.vectorDim).cuda()
+        self.layerNorm = nn.LayerNorm(self.vectorDim).to(self.device)
 
         # self.fc = nn.Linear(n_head * d_v, d_model)
         # nn.init.xavier_normal_(self.fc.weight)
 
-        self.dropout = nn.Dropout(dropout).cuda()
+        self.dropout = nn.Dropout(dropout).to(self.device)
 
 
     def forward(self, q, k, v, mask=None):
@@ -100,11 +98,12 @@ class PositionwiseFeedForward(nn.Module):
     def __init__(self, hiddenDim, dropout=0.1,use_cuda =True):
         super().__init__()
         self.hiddenDim = hiddenDim
-        
-        self.feedForward1 = nn.Conv1d(self.hiddenDim, self.hiddenDim, 1).cuda() # position-wise
-        self.feedForward2 = nn.Conv1d(self.hiddenDim, self.hiddenDim, 1).cuda() # position-wise
-        self.layerNorm = nn.LayerNorm(self.hiddenDim).cuda()
-        self.dropout = nn.Dropout(dropout).cuda()
+        self.device = resolve_device(use_cuda)
+
+        self.feedForward1 = nn.Conv1d(self.hiddenDim, self.hiddenDim, 1).to(self.device) # position-wise
+        self.feedForward2 = nn.Conv1d(self.hiddenDim, self.hiddenDim, 1).to(self.device) # position-wise
+        self.layerNorm = nn.LayerNorm(self.hiddenDim).to(self.device)
+        self.dropout = nn.Dropout(dropout).to(self.device)
 
     def forward(self, context):
         residual = context

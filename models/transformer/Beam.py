@@ -7,7 +7,7 @@
 
 import torch
 import numpy as np
-import transformer.Constants as Constants
+from . import Constants
 
 class Beam():
     ''' Beam search '''
@@ -60,7 +60,7 @@ class Beam():
 
         # bestScoresId is flattened as a (beam x word) array,
         # so we need to calculate which word and beam each score came from
-        prev_k = best_scores_id / num_words
+        prev_k = torch.div(best_scores_id, num_words, rounding_mode='floor')
         self.prev_ks.append(prev_k)
         self.next_ys.append(best_scores_id - prev_k * num_words)
 

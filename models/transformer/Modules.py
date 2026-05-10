@@ -2,9 +2,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-np.random.seed(1337)
-torch.manual_seed(1337)
-torch.cuda.manual_seed(1337)
 mySeed = np.random.RandomState(1234)
 
 __author__ = "Yu-Hsiang Huang"

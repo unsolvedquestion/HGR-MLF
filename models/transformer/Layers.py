@@ -4,9 +4,6 @@ import torch.nn as nn
 import numpy as np
 from models.transformer.SubLayers import MultiHeadAttention, PositionwiseFeedForward
 
-np.random.seed(1337)
-torch.manual_seed(1337)
-torch.cuda.manual_seed(1337)
 mySeed = np.random.RandomState(1234)
 
 class TransformerLayer(nn.Module):
@@ -34,4 +31,3 @@ class TransformerLayer(nn.Module):
         contextOutput *= paddingMask
 
         return contextOutput
-

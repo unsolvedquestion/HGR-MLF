@@ -1,14 +1,25 @@
-#import transformer.Constants
-#import transformer.Modules
-#import transformer.Layers
-#import transformer.SubLayers
-#import transformer.Models
-#import transformer.Translator
-#import transformer.Beam
-#import transformer.Optim
+"""Legacy transformer utilities kept for compatibility.
 
-#__all__ = [
-#    transformer.Constants, transformer.Modules, transformer.Layers,
-#    transformer.SubLayers, transformer.Models]
-    #, transformer.Optim,
-    #transformer.Translator, transformer.Beam]
+These modules are not used by the main DocRE training pipeline, but they are
+now importable and documented instead of being half-commented placeholders.
+"""
+
+from . import Beam
+from . import Constants
+from . import Layers
+from . import Models
+from . import Modules
+from . import Optim
+from . import SubLayers
+from . import Translator
+
+__all__ = [
+    "Beam",
+    "Constants",
+    "Layers",
+    "Models",
+    "Modules",
+    "Optim",
+    "SubLayers",
+    "Translator",
+]
